@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import pydeck as pdk
 from datetime import datetime, timedelta
-import io  # <--- NOVA BIBLIOTECA PARA GERAR EXCEL
+import io
 
 # ==========================================
 # 1. ESTADO DE SESSÃO E TEMA DINÂMICO
@@ -55,7 +55,7 @@ else:
     heatmap_color = "ylorbr"
     arc_color = [93, 64, 55, 200]
 
-# CSS Poderoso para formatação final
+# CSS Poderoso
 st.markdown(f"""
     <style>
     [data-testid="stHeader"] {{ background-color: transparent !important; }}
@@ -96,25 +96,46 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. MOTOR DE DADOS E ESTATÍSTICA
+# 2. MOTOR DE DADOS E ESTATÍSTICA (À PROVA DE FALHAS)
 # ==========================================
 @st.cache_data(ttl=300)
 def obter_dados():
     hoje = datetime.today()
     inicio = hoje - timedelta(days=180)
-    
     tickers = ['KC=F', 'BRL=X', 'CL=F']
-    df_raw = yf.download(tickers, start=inicio, end=hoje, progress=False)['Close']
-    df_raw = df_raw.ffill().dropna()
-    df_raw.columns = ['Dolar', 'Petroleo', 'Cafe'] 
     
-    cafe_full = yf.download('KC=F', start=inicio, end=hoje, progress=False)
-    if isinstance(cafe_full.columns, pd.MultiIndex):
-        cafe_full.columns = cafe_full.columns.get_level_values(0)
-    
-    return cafe_full, df_raw
+    try:
+        df_raw = yf.download(tickers, start=inicio, end=hoje, progress=False)
+        
+        # Ajuste para lidar com diferentes versões do yfinance na nuvem
+        if isinstance(df_raw.columns, pd.MultiIndex):
+            df_close = df_raw['Close'].copy()
+        else:
+            df_close = df_raw.copy()
+            
+        # Mapeando colunas com segurança
+        df_macro = pd.DataFrame()
+        df_macro['Dolar'] = df_close['BRL=X'] if 'BRL=X' in df_close.columns else pd.Series(dtype=float)
+        df_macro['Petroleo'] = df_close['CL=F'] if 'CL=F' in df_close.columns else pd.Series(dtype=float)
+        df_macro['Cafe'] = df_close['KC=F'] if 'KC=F' in df_close.columns else pd.Series(dtype=float)
+        
+        # Corrige feriados antes de remover linhas vazias
+        df_macro = df_macro.ffill().bfill().dropna()
+        
+        cafe_full = yf.download('KC=F', start=inicio, end=hoje, progress=False)
+        if isinstance(cafe_full.columns, pd.MultiIndex):
+            cafe_full.columns = cafe_full.columns.get_level_values(0)
+            
+        return cafe_full, df_macro
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
 
 cafe_df, macro_df = obter_dados()
+
+# TRAVA DE SEGURANÇA PROFISSIONAL
+if cafe_df.empty or macro_df.empty:
+    st.warning("⏳ **Aviso de Conexão (Nuvem):** O servidor do Yahoo Finance bloqueou a nossa requisição temporariamente devido ao alto tráfego no Streamlit Cloud. Por favor, atualize a página em 1 ou 2 minutos.")
+    st.stop()
 
 preco_atual = cafe_df['Close'].iloc[-1].item()
 dolar_atual = macro_df['Dolar'].iloc[-1].item()
@@ -283,61 +304,46 @@ with tab5:
         </div>
     """, unsafe_allow_html=True)
     
-    # GERADOR DO EXCEL PROFISSIONAL
     buffer = io.BytesIO()
-    
-    # Usando engine xlsxwriter para formatação avançada
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        # Pega a base e garante que o índice (Data) vire uma coluna real
         df_export = macro_df.reset_index()
         df_export.rename(columns={'Date': 'Data Base'}, inplace=True)
-        
-        # Joga os dados na aba do Excel
         df_export.to_excel(writer, sheet_name='Dashboard_Quant', index=False)
         
         workbook  = writer.book
         worksheet = writer.sheets['Dashboard_Quant']
         
-        # Definindo formatos elegantes
         formato_header = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#3E2723', 'border': 1, 'align': 'center'})
         formato_data = workbook.add_format({'num_format': 'dd/mm/yyyy', 'align': 'center'})
         formato_moeda = workbook.add_format({'num_format': 'R$ #,##0.00'})
         formato_preco = workbook.add_format({'num_format': '#,##0.00'})
         
-        # Aplicando a largura e o formato nas colunas
         worksheet.set_column('A:A', 15, formato_data)
-        worksheet.set_column('B:B', 15, formato_moeda)   # Dolar
-        worksheet.set_column('C:C', 15, formato_preco)   # Petroleo
-        worksheet.set_column('D:D', 15, formato_preco)   # Cafe
+        worksheet.set_column('B:B', 15, formato_moeda)
+        worksheet.set_column('C:C', 15, formato_preco)
+        worksheet.set_column('D:D', 15, formato_preco)
         
-        # Pinta o cabeçalho
         for col_num, value in enumerate(df_export.columns.values):
             worksheet.write(0, col_num, value, formato_header)
             
-        # --- CRIANDO O GRÁFICO DENTRO DO EXCEL ---
         chart = workbook.add_chart({'type': 'line'})
         max_row = len(df_export)
         
-        # Adiciona a série de dados do Café
-        chart.add_series({
-            'name':       ['Dashboard_Quant', 0, 3], # Coluna D: 'Cafe'
-            'categories': ['Dashboard_Quant', 1, 0, max_row, 0], # Coluna A: Datas
-            'values':     ['Dashboard_Quant', 1, 3, max_row, 3], # Coluna D: Valores
-            'line':       {'color': '#5D4037', 'width': 2.25}
-        })
-        
-        # Estilo do gráfico no Excel
-        chart.set_title ({'name': 'Evolução Cotação ICE (USc/lb)'})
-        chart.set_x_axis({'name': 'Período', 'date_axis': True})
-        chart.set_y_axis({'name': 'USc/lb', 'major_gridlines': {'visible': True}})
-        chart.set_legend({'position': 'bottom'})
-        
-        # Insere o gráfico do lado dos dados
-        worksheet.insert_chart('F2', chart, {'x_scale': 1.5, 'y_scale': 1.2})
+        if max_row > 1:
+            chart.add_series({
+                'name':       ['Dashboard_Quant', 0, 3],
+                'categories': ['Dashboard_Quant', 1, 0, max_row, 0],
+                'values':     ['Dashboard_Quant', 1, 3, max_row, 3],
+                'line':       {'color': '#5D4037', 'width': 2.25}
+            })
+            
+            chart.set_title ({'name': 'Evolução Cotação ICE (USc/lb)'})
+            chart.set_x_axis({'name': 'Período', 'date_axis': True})
+            chart.set_y_axis({'name': 'USc/lb', 'major_gridlines': {'visible': True}})
+            chart.set_legend({'position': 'bottom'})
+            worksheet.insert_chart('F2', chart, {'x_scale': 1.5, 'y_scale': 1.2})
         
     buffer.seek(0)
-    
-    # Novo botão que faz download do Excel (.xlsx)
     st.download_button(
         label="📊 Baixar Relatório Executivo (.xlsx)",
         data=buffer,
